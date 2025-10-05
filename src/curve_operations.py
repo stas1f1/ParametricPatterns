@@ -50,8 +50,12 @@ class CurveManipulator:
             raise ValueError("Invalid curve format: missing corners or segments")
 
         all_points = []
+        corner_indices = []  # Track which points are corners
 
         for segment in segments:
+            # Mark the start of this segment as a corner
+            corner_indices.append(len(all_points))
+
             if segment['type'] == 'line':
                 # For lines, just use start and end points
                 start = np.array(segment['start_point'])
@@ -88,9 +92,10 @@ class CurveManipulator:
 
         # Apply distortion if requested
         if apply_distortion and distortion_params:
-            from utils.geometry import add_noise_to_curve
-            points = add_noise_to_curve(
+            from utils.geometry import add_noise_to_curve_with_corners
+            points = add_noise_to_curve_with_corners(
                 points,
+                corner_indices=corner_indices,
                 amplitude=distortion_params.get('amplitude', 0),
                 frequency=distortion_params.get('frequency', 8)
             )
@@ -132,20 +137,40 @@ class CurveManipulator:
             k
         ]
 
-    def evaluate(self, num_points=200):
+    def evaluate(self, num_points=200, apply_distortion=False, distortion_params=None):
         """
         Evaluate current spline.
 
         Args:
             num_points: Number of points to evaluate
+            apply_distortion: Whether to apply distortion effect
+            distortion_params: Dictionary with 'amplitude' and 'frequency' for distortion
 
         Returns:
             Array of (x, y) points
         """
+        # Check if using new format (segments) - if so, use segment reconstruction with distortion
+        if 'segments' in self.current_data and apply_distortion:
+            return self._reconstruct_points_from_segments(
+                apply_distortion=apply_distortion,
+                distortion_params=distortion_params
+            )
+
         tck = self.get_tck()
         u = np.linspace(0, 1, num_points)
         x, y = interpolate.splev(u, tck)
-        return np.column_stack([x, y])
+        points = np.column_stack([x, y])
+
+        # Apply distortion if requested
+        if apply_distortion and distortion_params:
+            from utils.geometry import add_noise_to_curve
+            points = add_noise_to_curve(
+                points,
+                amplitude=distortion_params.get('amplitude', 0),
+                frequency=distortion_params.get('frequency', 8)
+            )
+
+        return points
 
     def get_key_points(self):
         """Get key points dictionary."""

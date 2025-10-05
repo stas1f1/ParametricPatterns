@@ -73,8 +73,18 @@ class PatternEngine:
         # Start with original data
         pattern.reset()
 
-        # Get evaluated points
-        points = pattern.evaluate(num_points=200)
+        # Check distortion parameter
+        distortion = params.get('distortion', 0)
+
+        # Get evaluated points - apply distortion at evaluation if we have segment-based data
+        if distortion > 0:
+            points = pattern.evaluate(
+                num_points=200,
+                apply_distortion=True,
+                distortion_params={'amplitude': distortion, 'frequency': 8}
+            )
+        else:
+            points = pattern.evaluate(num_points=200)
 
         # Get bounds and key points for reference
         bounds = pattern.get_bounds()
@@ -106,11 +116,6 @@ class PatternEngine:
         shoulder_offset = params.get('shoulder_level', 0)
         if shoulder_offset != 0 and (key_points.get('shoulder_left') or key_points.get('shoulder_right')):
             points = self._adjust_region(points, bounds, 'shoulder', shoulder_offset)
-
-        # 5. Apply edge distortion
-        distortion = params.get('distortion', 0)
-        if distortion > 0:
-            points = add_noise_to_curve(points, amplitude=distortion, frequency=8)
 
         # Update pattern with new spline
         new_tck = reconstruct_spline_from_points(points)

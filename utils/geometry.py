@@ -181,3 +181,85 @@ def add_noise_to_curve(points, amplitude=1.0, frequency=10, seed=None):
     distorted = points + normals * distortion[:, np.newaxis]
 
     return distorted
+
+
+def add_noise_to_curve_with_corners(points, corner_indices, amplitude=1.0, frequency=10, seed=None):
+    """
+    Add sinusoidal/random distortion to curve with amplified displacement at corners.
+    Corners receive stronger outward/inward shifts to create more dramatic variation.
+
+    Args:
+        points: Array of (x, y) points
+        corner_indices: List of indices that represent corners
+        amplitude: Maximum displacement in pixels
+        frequency: Number of oscillations along the curve
+        seed: Random seed (None = random)
+
+    Returns:
+        Distorted points
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    points = np.array(points)
+    num_points = len(points)
+
+    # Calculate normals at each point
+    normals = np.zeros_like(points)
+    for i in range(num_points):
+        if i == 0:
+            tangent = points[1] - points[-1]
+        elif i == num_points - 1:
+            tangent = points[0] - points[-2]
+        else:
+            tangent = points[i+1] - points[i-1]
+
+        # Normal is perpendicular to tangent
+        tangent_normalized = tangent / (np.linalg.norm(tangent) + 1e-8)
+        normals[i] = [-tangent_normalized[1], tangent_normalized[0]]
+
+    # Generate base distortion pattern
+    t = np.linspace(0, 2 * np.pi * frequency, num_points)
+    distortion = amplitude * (np.sin(t) + 0.3 * np.random.randn(num_points))
+
+    # Create weight mask that amplifies distortion at corners
+    weights = np.ones(num_points)
+    corner_influence_radius = max(5, num_points // 40)  # Radius around corner to amplify distortion
+
+    # Generate random displacement for each corner (outward or inward)
+    corner_displacements = {}
+    for corner_idx in corner_indices:
+        # Each corner gets a random displacement direction and magnitude (1.5x to 2.5x base amplitude)
+        corner_displacements[corner_idx] = np.random.uniform(-2.5, 2.5) * amplitude
+
+    for corner_idx in corner_indices:
+        corner_displacement = corner_displacements[corner_idx]
+
+        for i in range(num_points):
+            # Calculate circular distance to corner
+            dist = min(abs(i - corner_idx), num_points - abs(i - corner_idx))
+
+            if dist < corner_influence_radius:
+                # Amplify distortion at corners with smooth falloff
+                # At corner: 2.0x base distortion + corner-specific displacement
+                # Away from corner: smooth transition back to 1.0x
+                t_fade = dist / corner_influence_radius
+                # Smooth falloff using cosine interpolation
+                falloff = (1 + np.cos(t_fade * np.pi)) / 2
+
+                # Add amplification at corner (2.0x at corner, fading to 1.0x)
+                amplification = 1.0 + 1.0 * falloff
+
+                # Apply corner-specific displacement
+                if i == corner_idx:
+                    # At the exact corner, use the corner displacement
+                    distortion[i] = corner_displacement
+                else:
+                    # Near corner, blend in corner displacement
+                    distortion[i] += corner_displacement * falloff * 0.5
+                    weights[i] = max(weights[i], amplification)
+
+    # Apply weighted distortion along normals
+    distorted = points + normals * (distortion * weights)[:, np.newaxis]
+
+    return distorted
