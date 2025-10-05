@@ -32,6 +32,71 @@ class CurveManipulator:
         """Reset to original curve data."""
         self.current_data = json.loads(json.dumps(self.original_data))
 
+    def _reconstruct_points_from_segments(self, apply_distortion=False, distortion_params=None):
+        """
+        Reconstruct full curve points from corner-based segments.
+
+        Args:
+            apply_distortion: Whether to apply distortion effect
+            distortion_params: Dictionary with 'amplitude' and 'frequency' for distortion
+
+        Returns:
+            Array of (x, y) points representing the complete curve
+        """
+        corners = self.current_data.get('corners', [])
+        segments = self.current_data.get('segments', [])
+
+        if not corners or not segments:
+            raise ValueError("Invalid curve format: missing corners or segments")
+
+        all_points = []
+
+        for segment in segments:
+            if segment['type'] == 'line':
+                # For lines, just use start and end points
+                start = np.array(segment['start_point'])
+                end = np.array(segment['end_point'])
+                # Interpolate between start and end for smooth curve
+                line_points = np.linspace(start, end, 20)
+                all_points.extend(line_points[:-1])  # Exclude last to avoid duplicates
+
+            elif segment['type'] == 'curve':
+                # For curves, use control points to create smooth curve
+                control_pts = np.array(segment['control_points'])
+
+                # Fit spline through control points
+                if len(control_pts) >= 4:
+                    tck, u = interpolate.splprep([control_pts[:, 0], control_pts[:, 1]], k=3, s=0)
+                elif len(control_pts) == 3:
+                    tck, u = interpolate.splprep([control_pts[:, 0], control_pts[:, 1]], k=2, s=0)
+                else:
+                    # Too few points, just use them directly
+                    all_points.extend(control_pts[:-1])
+                    continue
+
+                # Evaluate spline
+                u_new = np.linspace(0, 1, 20)
+                x, y = interpolate.splev(u_new, tck)
+                curve_points = np.column_stack([x, y])
+                all_points.extend(curve_points[:-1])  # Exclude last to avoid duplicates
+
+        # Close the curve by adding the first point at the end
+        if all_points:
+            all_points.append(all_points[0])
+
+        points = np.array(all_points)
+
+        # Apply distortion if requested
+        if apply_distortion and distortion_params:
+            from utils.geometry import add_noise_to_curve
+            points = add_noise_to_curve(
+                points,
+                amplitude=distortion_params.get('amplitude', 0),
+                frequency=distortion_params.get('frequency', 8)
+            )
+
+        return points
+
     def get_tck(self):
         """
         Get spline tck tuple from current data.
@@ -39,12 +104,19 @@ class CurveManipulator:
         Returns:
             Tuple of (t, c, k) for scipy splev
         """
-        tck_list = self.current_data['spline_tck']
-        # Convert lists back to arrays
-        t = np.array(tck_list[0])
-        c = [np.array(tck_list[1][0]), np.array(tck_list[1][1])]
-        k = tck_list[2]
-        return (t, c, k)
+        # Check if old format (single spline_tck) or new format (segments)
+        if 'spline_tck' in self.current_data:
+            # Old format
+            tck_list = self.current_data['spline_tck']
+            # Convert lists back to arrays
+            t = np.array(tck_list[0])
+            c = [np.array(tck_list[1][0]), np.array(tck_list[1][1])]
+            k = tck_list[2]
+            return (t, c, k)
+        else:
+            # New format - reconstruct from segments
+            points = self._reconstruct_points_from_segments()
+            return reconstruct_spline_from_points(points)
 
     def set_tck(self, tck):
         """

@@ -148,13 +148,114 @@ class PatternConverter:
             'armpit_right': armpit_right,
         }
 
+    def detect_corners(self, points, angle_threshold=130, min_distance=80, window=30):
+        """
+        Detect sharp corner points (actual pattern corners).
+
+        Args:
+            points: Array of contour points
+            angle_threshold: Angle threshold in degrees (lower = sharper corner)
+            min_distance: Minimum distance between corners in pixels
+            window: Window size for angle calculation
+
+        Returns:
+            List of corner point indices
+        """
+        points = np.array(points)
+        n = len(points)
+        angles = []
+
+        # Calculate angles at each point
+        for i in range(n):
+            # Get neighboring points with larger window
+            p1 = points[(i - window) % n]
+            p2 = points[i]
+            p3 = points[(i + window) % n]
+
+            # Calculate vectors
+            v1 = p1 - p2
+            v2 = p3 - p2
+
+            # Calculate angle
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+
+            if norm1 > 0 and norm2 > 0:
+                cos_angle = np.dot(v1, v2) / (norm1 * norm2)
+                cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                angle = np.degrees(np.arccos(cos_angle))
+                angles.append({'idx': i, 'angle': angle, 'point': p2})
+
+        # Sort by angle to get sharpest corners first
+        angles = sorted(angles, key=lambda a: a['angle'])
+
+        # Select only sharp corners that are far apart
+        corners = []
+        for corner in angles:
+            if corner['angle'] >= angle_threshold:
+                break  # No more sharp corners
+
+            too_close = False
+            for existing in corners:
+                dist = np.linalg.norm(corner['point'] - existing['point'])
+                if dist < min_distance:
+                    too_close = True
+                    break
+
+            if not too_close:
+                corners.append(corner)
+
+        # Sort by position along contour
+        corners = sorted(corners, key=lambda c: c['idx'])
+
+        return corners
+
+    def is_segment_straight(self, points, tolerance=5):
+        """
+        Check if a segment is approximately straight.
+
+        Args:
+            points: Array of points in the segment
+            tolerance: Maximum deviation from straight line in pixels
+
+        Returns:
+            True if segment is straight, False otherwise
+        """
+        if len(points) < 3:
+            return True
+
+        # Fit a line from start to end
+        start = points[0]
+        end = points[-1]
+
+        # Calculate distance from each point to the line
+        line_vec = end - start
+        line_len = np.linalg.norm(line_vec)
+
+        if line_len < 1:
+            return True
+
+        line_vec_norm = line_vec / line_len
+
+        max_dist = 0
+        for point in points[1:-1]:
+            # Vector from start to point
+            point_vec = point - start
+            # Project onto line
+            projection = np.dot(point_vec, line_vec_norm) * line_vec_norm
+            # Distance from point to line
+            dist = np.linalg.norm(point_vec - projection)
+            max_dist = max(max_dist, dist)
+
+        return max_dist <= tolerance
+
     def convert_to_curves(self, contour, num_control_points=50):
         """
-        Convert contour to curve representation.
+        Convert contour to curve representation using corner-based splines.
 
         Args:
             contour: OpenCV contour
-            num_control_points: Number of control points for spline
+            num_control_points: Number of control points for spline (deprecated, uses corners)
 
         Returns:
             Dictionary with curve data
@@ -162,21 +263,59 @@ class PatternConverter:
         # Extract points from contour
         points = contour.reshape(-1, 2).astype(float)
 
-        # Fit B-spline
-        spline = fit_bspline(points, num_control_points=num_control_points)
+        # Detect corner points
+        corners = self.detect_corners(points)
 
-        # Identify key points
-        key_points = self.identify_key_points(points)
+        if len(corners) < 3:
+            raise ValueError(f"Not enough corners detected: {len(corners)}. Need at least 3.")
 
-        # Evaluate spline for storage
-        evaluated_points = evaluate_bspline(spline, num_points=200)
+        # Create segments between corners - either lines or curves
+        segments = []
+        n_corners = len(corners)
+
+        for i in range(n_corners):
+            start_idx = corners[i]['idx']
+            end_idx = corners[(i + 1) % n_corners]['idx']
+
+            # Extract points for this segment
+            if end_idx > start_idx:
+                segment_points = points[start_idx:end_idx+1]
+            else:
+                # Wrap around
+                segment_points = np.vstack([points[start_idx:], points[:end_idx+1]])
+
+            # Check if segment is straight or curved
+            is_straight = self.is_segment_straight(segment_points)
+
+            if is_straight:
+                # Store as a line
+                segments.append({
+                    'type': 'line',
+                    'start_corner': i,
+                    'end_corner': (i + 1) % n_corners,
+                    'start_point': convert_numpy_to_list(segment_points[0]),
+                    'end_point': convert_numpy_to_list(segment_points[-1])
+                })
+            else:
+                # Store as a curve - use just a few sample points
+                # Downsample to ~5 control points
+                n_samples = min(5, len(segment_points))
+                indices = np.linspace(0, len(segment_points)-1, n_samples, dtype=int)
+                control_pts = segment_points[indices]
+
+                segments.append({
+                    'type': 'curve',
+                    'start_corner': i,
+                    'end_corner': (i + 1) % n_corners,
+                    'control_points': convert_numpy_to_list(control_pts)
+                })
 
         return {
-            'original_points': convert_numpy_to_list(points),
-            'spline_tck': convert_numpy_to_list(spline['tck']),
-            'spline_type': spline['type'],
-            'key_points': convert_numpy_to_list(key_points),
-            'evaluated_points': convert_numpy_to_list(evaluated_points),
+            'corners': convert_numpy_to_list([{
+                'point': c['point'].tolist(),
+                'angle': c['angle']
+            } for c in corners]),
+            'segments': segments,
             'pixels_per_cm': self.pixels_per_cm,
             'image_size': list(self.image.shape[:2])
         }
